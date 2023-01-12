@@ -1,0 +1,172 @@
+
+            <script type="text/javascript">
+                fetch_obj=function(obj){
+                    fetch('/api.json', {
+                        method: 'POST',
+                        headers: {
+                        'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(obj),
+                        })
+                        .then((response) => response.json())
+                        .then((data) => {
+                        console.log('Success:', data);
+                        })
+                        .catch((error) => {
+                        console.error('Error:', error);
+                        });
+                    }
+                        
+
+                    VMNAME="test2";
+                    //https://nodejs.org/download/release/latest-v16.x/
+                    run_vm=function(){
+                        //proot-userland
+                        ///usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/usr/games:/usr/local/games HOME=/root LANG=C.UTF-8 
+                        fetch_obj( {cmd:"create_vm",vm:VMNAME,exe:"env",params:("PROOT_TMP_DIR=%FILES% %FILES%/bin/proot --kill-on-exit -0 -r %FILES%/"+(prompt("subpath?"))+" -w /root -b /dev:/dev -b /proc:/proc -b /sys:/sys -b /mnt/sdcard:/sdcard -b /mnt:/mnt"+prompt("command","/bin/sh")).split(" "), envs:{TESTED_ENV:"ABCDE"} } ); 
+                    }
+
+                    hub_pull=function(container,version){
+                        fetch_obj( {cmd:"docker_hub_pull",container: prompt("container name","alpine:latest"), save_to:"%FILES%/"+prompt("container dir?","alpine"),arch:prompt("arch?","arm/v7") } );
+                    }
+
+
+                    //PATH=/usr/bin:/usr/local/bin:/bin:/sbin:/usr/local/sbin:/usr/sbin ./root/bin/proot-userland -r `pwd` -w /root -b /dev -b /proc -b /sys
+//                    fetch_obj( {cmd:"create_vm",vm:VMNAME,exe:"/data/data/io.xao.myapplication/files/root/bin/proot-userland",params:"-r /data/data/io.xao.myapplication/files/ -w /root -b /dev:/dev -b /proc:/proc -b /sys:/sys -b /mnt:/mnt /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/usr/games:/usr/local/games HOME=/root LANG=C.UTF-8 /bin/sh".split(" "), envs:{TESTED_ENV:"ABCDE"} } ); 
+// TEST = fetch_obj( {cmd:"create_vm",vm:VMNAME,exe:"bash",params:[], envs:{TESTED_ENV:"ABCDE"} } );
+
+//                    fetch_obj( {cmd:"create_vm",vm:VMNAME,exe:"/system/bin/sh",params:[], envs:{TESTED_ENV:"ABCDE"} } );
+//                    fetch_obj( {cmd:"docker_hub_pull",container: "library/node:latest" } );
+     
+                    okd=function(e){
+                        if(e.keyCode==13){
+                            e=document.getElementById("it");
+                            fetch_obj( {cmd:"send_stdin",data:e.value+"\n",vm:VMNAME} );
+                            e.value="";
+                        }
+    //                    console.log("e="+e.keyCode);    
+                    }
+                    document.write('<textarea id="ta">B</textarea><br /><input type="text" id="it" onkeydown="okd(event)" />');
+    
+                    get_stdin_f=function(){
+                        fetch('/api.json', {
+                            method: 'POST',
+                            headers: {
+                            'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify(
+                                {cmd:"get_stdout",vm:VMNAME}
+                                
+                            ),
+                            })
+                            .then((response) => response.json())
+                            .then((data) => {
+                                console.log('Success:', data);
+                                if (data.stdout.length >1 || data.stderr.length>1) {
+                                    document.getElementById("ta").value=(data.stdout)+"\n"+(data.stderr);
+                                }
+                            })
+                            .catch((error) => {
+                            console.error('Error:', error);
+                            });
+                        }
+    
+//                        get_stdin_f();
+//                        setInterval(get_stdin_f,1500)
+                        
+
+                        function mkdir(){
+                            fetch_obj( {cmd:"mkdir",dir:prompt("dir?","%FILES%")} );                            
+                        }
+                        function chdir(){
+                            fetch_obj( {cmd:"chdir",dir:prompt("dir?","%FILES%")} );                                                        
+                        }
+                        function install_archive(){
+                            fetch_obj( {cmd:"install_archive",url:prompt("url","https://[tar.gz/tar/tar.xz]"),ignore_prefix:""} );
+                        }
+
+    
+                    </script>
+
+                    <input type="button" onclick="run_vm()" value="run vm" /> 
+                    <input type="button" onclick="hub_pull()" value="hub pull" /> 
+                    <input type="button" onclick="get_stdin_f()" value="get stdin" /> 
+                    <input type="button" onclick="setInterval(get_stdin_f,5000)" value="get stdin TIMER" /> 
+                    <input type="button" onclick="mkdir()" value="mkdir" /> 
+                    <input type="button" onclick="chdir()" value="chdir" /> 
+                    <input type="button" onclick="install_archive()" value="install_archive" /> 
+
+                    <!--
+                    cd /data/data/io.xao.myapplication/files
+    
+                    VMNAME="test2";
+                    fetch_obj( {cmd:"create_vm",vm:VMNAME,exe:"/system/bin/sh",params:[], envs:{TESTED_ENV:"ABCDE"} } );
+                    fetch_obj( {cmd:"send_stdin",data:"env\n",vm:VMNAME} );
+                    fetch_obj( {cmd:"get_stdout",vm:VMNAME} );
+    
+                    
+                    fetch_obj( {cmd:"mkdir",dir:"/data/data/io.xao.myapplication/files/alpine"} );
+                    fetch_obj( {cmd:"chdir",dir:"/data/data/io.xao.myapplication/files/alpine"} );
+                    fetch_obj( {cmd:"install_archive",url:"https://dl-cdn.alpinelinux.org/alpine/v3.17/releases/armhf/alpine-minirootfs-3.17.1-armhf.tar.gz",ignore_prefix:""} );
+                    
+LD_LIBRARY_PATH=lib:usr/lib: usr/bin/node
+./proot-rs -r /data/data/io.xao.myapplication/files/alpine -- /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/usr/games:/usr/local/games HOME=/root LANG=C.UTF-8 /bin/sh
+
+                    fetch_obj( {cmd:"chdir",dir:"/data/data/io.xao.myapplication/files"} );
+                    fetch_obj( {cmd:"termux_install_app",app:"libicu"} );
+                    fetch_obj( {cmd:"termux_install_app",app:"resolv-conf"} );
+                    fetch_obj( {cmd:"termux_install_app",app:"c-ares"} );
+                    fetch_obj( {cmd:"termux_install_app",app:"nodejs"} );
+                    
+
+                    ./proot-rs -r `pwd`/alpine -- /bin/sh 
+
+//                    fetch_obj( {cmd:"create_vm",vm:VMNAME,exe:"/data/data/io.xao.myapplication/files/proot-rs",params:"-r /data/data/io.xao.myapplication/files/alpine -w /root -b /dev:/dev -b /proc:/proc -b /sys:/sys -b /mnt:/mnt -- /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/usr/games:/usr/local/games HOME=/root LANG=C.UTF-8 /bin/sh".split(" "), envs:{TESTED_ENV:"ABCDE"} } ); 
+
+                    fetch_obj( {cmd:"chdir",dir:"/data/data/io.xao.myapplication/files/"} );
+-                    fetch_obj( {cmd:"install_archive",url:"https://github.com/proot-me/proot-rs/releases/download/v0.1.0/proot-rs-v0.1.0-aarch64-linux-android.tar.gz",ignore_prefix:""} );
+                    fetch_obj( {cmd:"install_archive",url:"https://github.com/proot-me/proot-rs/releases/download/v0.1.0/proot-rs-v0.1.0-arm-linux-androideabi.tar.gz",ignore_prefix:""} );
+
+                    fetch_obj( {cmd:"install_archive",url:"https://raw.githubusercontent.com/green-green-avk/build-proot-android/master/packages/proot-android-armv7a.tar.gz",ignore_prefix:""} );
+                    fetch_obj( {cmd:"install_archive",url:"https://raw.githubusercontent.com/green-green-avk/build-proot-android/master/packages/proot-android-aarch64.tar.gz",ignore_prefix:""} );
+
+
+                    PATH=/usr/bin:/usr/local/bin:/bin:/sbin:/usr/local/sbin:/usr/sbin ./root/bin/proot -r `pwd` -w /root -b /dev -b /proc -b /sys
+                    PATH=/usr/bin:/usr/local/bin:/bin:/sbin:/usr/local/sbin:/usr/sbin ./root/bin/proot-userland -r `pwd` -w /root -b /dev -b /proc -b /sys
+
+                    --repository=http://dl-cdn.alpinelinux.org/alpine/edge/testing/
+                    here proot exists...
+                    https://dl-cdn.alpinelinux.org/alpine/v3.17/community/aarch64/APKINDEX.tar.gz
+
+                    
+                    PATH=/usr/bin:/bin:/usr/local/bin:/usr/sbin:/sbin
+
+                    LD_LIBRARY_PATH=/data/data/io.xao.myapplication/files/alpine/lib:/data/data/io.xao.myapplication/files/alpine/usr/lib /data/data/io.xao.myapplication/files/alpine/usr/bin/node
+                    
+
+//
+                    fetch_obj( {cmd:"create_vm",vm:VMNAME,exe:"/system/bin/sh",params:["-c","/data/data/io.xao.myapplication/files/proot-rs -r /data/data/io.xao.myapplication/files/alpine -w /root -b /dev:/dev -b /proc:/proc -b /sys:/sys -b /mnt:/mnt -- /usr/bin/node"], envs:{
+                        PATH:"/usr/local/sbin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/usr/games:/usr/local/games",
+                        HOME:"/root",
+                        LANG:"C.UTF-8"
+                    } } );
+
+
+                    fetch_obj( {
+                        cmd:"create_vm",
+                        vm:VMNAME,
+                        exe:"env",
+                        params:["LD_LIBRARY_PATH=/data/data/io.xao.myapplication/files/alpine/lib:/data/data/io.xao.myapplication/files/alpine/usr/lib","/data/data/io.xao.myapplication/files/alpine/usr/bin/node"],
+                         envs:{
+                            
+                            }                        
+                        } );
+    
+    
+                    cmd=function(t){
+                        fetch_obj( {cmd:"send_stdin",data:"env\n",vm:VMNAME} );
+                        fetch_obj( {cmd:"get_stdout",vm:VMNAME} );
+                    }
+                    -->                
+    
+                

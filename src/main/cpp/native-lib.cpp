@@ -7,5 +7,4 @@ extern "C" {
     JNIEXPORT void JNICALL Java_io_xao_myapplication_NativeRunnable_onServiceStart(JNIEnv *env, jobject thiz) {
         Rust_Java_io_xao_myapplication_NativeRunnable_onServiceStart(env,thiz);
     }
-
 }
