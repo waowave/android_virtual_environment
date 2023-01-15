@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+
+            <script type="text/javascript">
+
+/*
+npm install -g --unsafe-perm node-red
+npm install --production -g zigbee2mqtt@1.16.1
+
+*/
+            fetch_obj=async function(obj){
+                    return await fetch('/api.json', {
+                        method: 'POST',
+                        headers: {
+                        'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(obj),
+                        })
+                        .then((response) => response.json())
+                        .then((data) => {
+                        console.log('Success:', data);
+                        return data;
+                        })
+                        .catch((error) => {
+                        console.error('Error:', error);
+                        });
+                        return undefined;
+                    }
+                        
+                    VMNAME="";
+                    //VMNAME="test2";
+                    //https://nodejs.org/download/release/latest-v16.x/
+                    run_vm=function(){
+                        //proot-userland
+                        ///usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/usr/games:/usr/local/games HOME=/root LANG=C.UTF-8 
+                        fetch_obj( {cmd:"create_vm",vm:prompt("VM NAME?","vm1"),exe:"env",params:("PROOT_TMP_DIR=%FILES%/proot_tmp %FILES%/bin/proot --kill-on-exit -0 -r %FILES%/vms/"+(prompt("subpath?"))+" -w "+prompt("working dir?","/root")+" -b /dev:/dev -b /proc:/proc -b /sys:/sys -b /mnt/sdcard:/sdcard -b /mnt:/mnt "+prompt("command","/bin/sh")).split(" "), envs:{TESTED_ENV:"ABCDE"} } ); 
+                    }
+
+                    hub_pull=function(){
+                        fetch_obj( {cmd:"docker_hub_pull",image: prompt("image name","alpine:latest"), save_to:"%FILES%/vms/"+prompt("container dir?","alpine"),arch:prompt("arch?","arm/v7") } );
+                    }
+
+                    run_container=function(){
+                        fetch_obj( {cmd:"run_container", proot_version: "rs" , container: prompt("container name","test")} );
+                    }
+
+                    save_container_json=function(){
+                        fetch_obj( {cmd:"save_container_json",container: prompt("container name","test"),data:prompt("json data?","{}") } );
+                    }
+
+                    vms_list_change=function(v){
+                        console.log("set_current_vm"+v);
+                        VMNAME=v;
+                    }
+
+                    dir_list=async function(){
+                        let dirs = await fetch_obj( {cmd:"dir_list",dir:prompt("dir?","%FILES%") } );
+                        alert(dirs.dirs.join("\n"));
+                    }
+
+                    update_vms_list=async function(){
+                        let vms = await fetch_obj( {cmd:"get_vms_list" } );
+//                        alert(vms.vms);
+                        if(typeof(vms)==undefined){return;}
+                        let vm_list= document.getElementById("vms");
+
+                        if (vms.vms.length != 0) {
+                            VMNAME=vms.vms[0];
+                        }
+
+                        let new_html="";
+                        //
+                        vms.vms.forEach(element => {
+                            console.log(element);
+                            new_html+="<option>"+encodeURI(element)+"</option>";                            
+                        });
+                        vm_list.innerHTML=new_html;
+                    }
+
+
+                    //PATH=/usr/bin:/usr/local/bin:/bin:/sbin:/usr/local/sbin:/usr/sbin ./root/bin/proot-userland -r `pwd` -w /root -b /dev -b /proc -b /sys
+//                    fetch_obj( {cmd:"create_vm",vm:VMNAME,exe:"/data/data/io.xao.myapplication/files/root/bin/proot-userland",params:"-r /data/data/io.xao.myapplication/files/ -w /root -b /dev:/dev -b /proc:/proc -b /sys:/sys -b /mnt:/mnt /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/usr/games:/usr/local/games HOME=/root LANG=C.UTF-8 /bin/sh".split(" "), envs:{TESTED_ENV:"ABCDE"} } ); 
+// TEST = fetch_obj( {cmd:"create_vm",vm:VMNAME,exe:"bash",params:[], envs:{TESTED_ENV:"ABCDE"} } );
+
+//                    fetch_obj( {cmd:"create_vm",vm:VMNAME,exe:"/system/bin/sh",params:[], envs:{TESTED_ENV:"ABCDE"} } );
+//                    fetch_obj( {cmd:"docker_hub_pull",container: "library/node:latest" } );
+     
+                    okd=function(e){
+                        if(e.keyCode==13){
+                            e=document.getElementById("it");
+                            fetch_obj( {cmd:"send_stdin",data:e.value+"\n",vm:VMNAME} );
+                            e.value="";
+                        }
+    //                    console.log("e="+e.keyCode);    
+                    }
+                    document.write('<textarea id="ta" style="width: 100%; height: 250px;">B</textarea><br /><input style="width: 100%;" type="text" id="it" onkeydown="okd(event)" /><br />');
+    
+                    get_stdin_f=function(){
+                        fetch('/api.json', {
+                            method: 'POST',
+                            headers: {
+                            'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify(
+                                {cmd:"get_stdout",vm:VMNAME}
+                                
+                            ),
+                            })
+                            .then((response) => response.json())
+                            .then((data) => {
+                                console.log('Success:', data);
+                                if (data.stdout.length >1 || data.stderr.length>1) {
+                                    document.getElementById("ta").value=(data.stdout)+"\n"+(data.stderr);
+                                }
+                            })
+                            .catch((error) => {
+                            console.error('Error:', error);
+                            });
+                        }
+    
+//                        get_stdin_f();
+//                        setInterval(get_stdin_f,1500)
+                        
+
+                        function mkdir(){
+                            fetch_obj( {cmd:"mkdir",dir:prompt("dir?","%FILES%")} );                            
+                        }
+                        function chdir(){
+                            fetch_obj( {cmd:"chdir",dir:prompt("dir?","%FILES%")} );                                                        
+                        }
+                        function install_archive(){
+                            fetch_obj( {cmd:"install_archive",url:prompt("url","https://[tar.gz/tar/tar.xz]"),ignore_prefix:""} );
+                        }
+
+                        function remove_fs_path(){
+                            fetch_obj( {cmd:"remove_fs_path",path:prompt("dir?","%FILES%")} );                                                        
+                        }
+                        
+                        function dir_copy(){
+                            fetch_obj( {cmd:"dir_copy",src_dir:prompt("source dir?","%FILES%"),dest_dir:prompt("dest dir?","%FILES%") } );                                                        
+                        }
+                        
+                    </script>
+
+                    <br />
+                    <input type="button" onclick="run_vm()" value="run vm" /> 
+                    <input type="button" onclick="hub_pull()" value="hub pull" /> 
+                    <input type="button" onclick="get_stdin_f()" value="get stdin" /> 
+                    <input type="button" onclick="setInterval(get_stdin_f,5000)" value="get stdin TIMER" /> 
+                    <input type="button" onclick="mkdir()" value="mkdir" /> 
+                    <input type="button" onclick="chdir()" value="chdir" /> 
+                    <input type="button" onclick="install_archive()" value="install_archive" /> 
+                    <input type="button" onclick="dir_list()" value="dir_list" /> 
+                    <input type="button" onclick="dir_copy()" value="dir_copy" /> 
+                    <input type="button" onclick="remove_fs_path()" value="remove_fs_path" /> 
+                    <input type="button" onclick="run_container()" value="run_container" /> 
+                    <input type="button" onclick="save_container_json()" value="save_container_json" /> 
+                    <input type="button" onclick="save_text_file()" value="save_text_file" /> 
+                   
+                    <br />             
+                    <input type="button" onclick="update_vms_list()" value="update_vms_list" /> <br />
+                    <label>VMS: </label>
+                    <select onChange="vms_list_change(this.options[this.selectedIndex].value)" id="vms"></select>

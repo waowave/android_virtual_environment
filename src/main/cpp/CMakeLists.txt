@@ -88,7 +88,7 @@ ExternalProject_Add(project_rust_main_lib
         DOWNLOAD_COMMAND ""
         CONFIGURE_COMMAND ""
         INSTALL_COMMAND ""
-        BUILD_COMMAND env AR=${NDK_TOOLCHAIN_REAL_PREFIX_AR} CC=${NDK_TOOLCHAIN_REAL_PREFIX}clang CXX=${NDK_TOOLCHAIN_REAL_PREFIX}clang++ ${CARGO_EXE} build --target ${RUST_TARGET} --release --target-dir ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/cargo_targets
+        BUILD_COMMAND env AR=${NDK_TOOLCHAIN_REAL_PREFIX_AR} CC=${NDK_TOOLCHAIN_REAL_PREFIX}clang CXX=${NDK_TOOLCHAIN_REAL_PREFIX}clang++ ${CARGO_EXE} build --target ${RUST_TARGET} --release --lib --target-dir ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/cargo_targets --features jni
 #        COMMAND ${CARGO_EXE} build --target ${RUST_TARGET} --release --target-dir ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/cargo_targets
         BUILD_ALWAYS ON
         #${CMAKE_SOURCE_DIR}/
