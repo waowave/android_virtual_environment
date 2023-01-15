@@ -20,6 +20,10 @@ pub mod docker_hub;
     use std::{collections::HashMap, marker::PhantomData, path::Path, sync::Arc};
     use self::{vm::VM,  docker_hub::{JConfigConfig, DockerHub}};
 
+
+    use nix::mount::{mount, umount, MsFlags};
+
+
     #[cfg(feature = "jni")]
     use jni::{JNIEnv, sys::{jobject, JNINativeInterface_}, objects::{JObject}};
 
@@ -900,7 +904,7 @@ pub mod docker_hub;
                         #[derive(Deserialize, Debug)]
                         struct HPRunContainer{
                             container:String, // in %FILES%/containers/cont.json
-                            proot_version:Option<String>,
+                            chroot_mode:Option<String>,
                         }                        
 
                         let params:HPRunContainer = serde_json::from_value(data.clone())?;
@@ -927,7 +931,7 @@ pub mod docker_hub;
 
                         let vm_mode;
                         
-                        if let Some(ver)=params.proot_version{
+                        if let Some(ver)=params.chroot_mode{
                             vm_mode=match ver.as_str(){
                                 "proot_rs" => VmRunMode::ProotRS,
                                 "proot_cpp" => VmRunMode::ProotCPP,
@@ -943,31 +947,106 @@ pub mod docker_hub;
 //                        let create_vm_exe= self.replace_path_with_env("%FILES%/bin/proot".to_string())?;
                        // let create_vm_exe= self.replace_path_with_env("%FILES%/proot-rs".to_string())?;
 
-
+                        let mut mounting_points=HashMap::new();
+                    
                         ["/dev","/proc","/sys","/mnt"]
                             .iter()
                             .for_each(|&f| {
-                                create_vm_params.push("-b".to_string());
-                                create_vm_params.push(format!("{}:{}",f,f).to_string());
-                                }
-                            );
+                                mounting_points.insert(f.clone().to_string(),f.clone().to_string());
+                            }
+                        );
+
 
                         if let Some(vols)=container_conf.volumes {
                             for (vol_k,vol_v) in vols {
-                                create_vm_params.push("-b".to_string());
                                 let vol_path_str=self.replace_path_with_env(vol_k)?;
-                                let vol_path=Path::new(&vol_path_str);
-                                
-                                if !vol_path.exists(){
-                                    tokio::fs::create_dir_all(vol_path).await?;
-                                }
-                                create_vm_params.push(format!("{}:{}",vol_path_str,vol_v).to_string());
-                                
+                                //let vol_path=Path::new(&vol_path_str);
+                                mounting_points.insert(vol_path_str.to_string(),vol_v.clone());                                                                
                             }
                         }
 
-                        create_vm_params.push("-r".to_string());
-                        create_vm_params.push( self.replace_path_with_env(container_conf.vm_path.clone())?  );
+                        let mut should_umount_when_err: Vec<String>=Vec::new();
+                        let fs_vm_path=self.replace_path_with_env(container_conf.vm_path.clone())?;
+
+
+                        for (vol_from,vol_to) in mounting_points {
+
+                            let vol_from_path=Path::new(vol_from.as_str());
+                            if !vol_from_path.exists(){
+                                tokio::fs::create_dir_all(vol_from_path).await?;
+                            }
+
+                            let vol_to_in_real_fs=vec![ fs_vm_path.as_str(),  vol_to.as_str() ].join("/");
+                            let vol_to_path_in_real_fs=Path::new(vol_to_in_real_fs.as_str());
+                            if !vol_to_path_in_real_fs.exists(){
+                                tokio::fs::create_dir_all(vol_to_path_in_real_fs).await?;
+                            }
+
+                            println!("mounting {} to {}",&vol_from,&vol_to_in_real_fs);
+
+                            match vm_mode{
+                                VmRunMode::ProotRS | VmRunMode::ProotCPP => {
+                                    create_vm_params.push("-b".to_string());
+                                    create_vm_params.push(format!("{}:{}",vol_from,vol_to).to_string());            
+                                },
+                                VmRunMode::Chroot => {
+                                    //try umount if mounted
+                                    
+                                    let ures=umount(vol_to_path_in_real_fs);
+                                    if let Err(uer)=ures{
+                                        println!("umount(if mounted) => ({}) err = {}", &vol_to_in_real_fs ,uer );
+                                    }
+
+                                    //mounting                                    
+                                    let mount_res = mount(
+                                        Some( vol_from_path ),
+                                        vol_to_path_in_real_fs,
+                                        None::<&Path>,
+                                        MsFlags::MS_BIND,
+                                        None::<&Path>,
+                                    );
+
+                                    match mount_res{
+                                        Ok(_o)=>{
+                                            should_umount_when_err.push(vol_to_in_real_fs);
+                                        },
+                                        Err(e)=>{
+                                            println!("mount err={}",e);
+                                            for umount_path in should_umount_when_err {
+                                                let p=Path::new(&umount_path);
+                                                let ures=umount(p);
+                                                if let Err(uer)=ures{
+                                                    println!("umount({}) err = {}", &umount_path ,uer );
+                                                }
+                                            }
+                                            break;
+                                        },
+                                    }
+                                }                                    
+                            }
+                        }
+
+                        //pass path with vm to parameters
+
+                        match vm_mode{
+                            VmRunMode::ProotRS | VmRunMode::ProotCPP => {
+                                create_vm_params.push("-r".to_string());
+                                create_vm_params.push( fs_vm_path  );       
+                            },
+                            VmRunMode::Chroot => {
+                                create_vm_params.push( fs_vm_path  );
+                            },
+                        }
+
+
+                        let mut create_vm_params_for_bash=Vec::<String>::new();
+                        
+                        if let VmRunMode::Chroot = vm_mode {
+                            create_vm_params.push( "sh".to_string() );
+                            create_vm_params.push( "-c".to_string() );
+                            create_vm_params.push( "echo 'chroot from xao'".to_string() );
+                        }
+
 
 
                         let workdir;
@@ -996,8 +1075,20 @@ pub mod docker_hub;
                             }
                         }
 
-                        create_vm_params.push("-w".to_string());
-                        create_vm_params.push( workdir );
+                        //setting workdir as parameter
+                        match vm_mode{
+                            VmRunMode::ProotRS | VmRunMode::ProotCPP => {
+                                create_vm_params.push("-w".to_string());
+                                create_vm_params.push( workdir );
+                            },
+                            VmRunMode::Chroot => {
+                                create_vm_params_for_bash.push("&& cd".to_string());
+                                create_vm_params_for_bash.push( workdir );
+                            },
+                        }
+
+
+
 
                         //envs 
                         //from dockerhub_conf
@@ -1056,8 +1147,24 @@ pub mod docker_hub;
 
                         }
 
-                        create_vm_params.extend(entrypoint);
-                        create_vm_params.extend(cmd);
+                        //cmd and entrypoint
+
+                        match vm_mode{
+                            VmRunMode::ProotRS | VmRunMode::ProotCPP => {
+                                create_vm_params.extend(entrypoint);
+                                create_vm_params.extend(cmd);
+                            },
+                            VmRunMode::Chroot => {
+                                create_vm_params_for_bash.push("&& ".to_string());
+                                create_vm_params_for_bash.extend(entrypoint);
+                                create_vm_params_for_bash.extend(cmd);
+
+                                create_vm_params.push(
+                                    create_vm_params_for_bash.join(" ")
+                                )
+                            },
+                        }
+
 
                         self.vm_add_app(
                             format!("container_{}",params.container).to_string(),

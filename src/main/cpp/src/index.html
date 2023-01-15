@@ -40,7 +40,7 @@ npm install --production -g zigbee2mqtt@1.16.1
                     }
 
                     run_container=function(){
-                        fetch_obj( {cmd:"run_container", proot_version: "rs" , container: prompt("container name","test")} );
+                        fetch_obj( {cmd:"run_container", chroot_mode: "chroot" , container: prompt("container name","test")} );
                     }
 
                     save_container_json=function(){
