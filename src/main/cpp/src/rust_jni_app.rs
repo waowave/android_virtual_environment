@@ -13,7 +13,7 @@ pub mod docker_hub;
     use http_body_util::BodyExt;
     use serde::{Deserialize, Serialize};
     use tokio::io::{AsyncWriteExt, AsyncReadExt};
-    use std::{io::prelude::*};
+    use std::{io::prelude::*, time::Duration, str::FromStr};
 
     use bytes::{Bytes, Buf};
     use hyper::Method;
@@ -21,6 +21,7 @@ pub mod docker_hub;
     use self::{vm::VM,  docker_hub::{JConfigConfig, DockerHub}};
 
 
+    #[cfg(not(target_os = "macos"))]
     use nix::mount::{mount, umount, MsFlags};
 
 
@@ -37,20 +38,37 @@ pub mod docker_hub;
         phantom: PhantomData<&'a String>,
         packages_map:tokio::sync::Mutex<HashMap<String, HashMap<String,String> >>,
         vms:  ArcMutex<HashMap<String,ArcMutex<VM>>>,
-        files_dir:std::sync::Mutex<String>,
+        files_dir:std::sync::Mutex<Option<String>>,
     }
+
 
 
     #[derive(Deserialize,Serialize, Debug)]
     struct ContainerConfigJSON{ //%FILES%/containers/container_name.json
         vm_path:String,
+        chroot_mode:String,
         volumes:Option<HashMap<String,String>>,
         envs:Option<HashMap<String,String>>,
         entrypoint:Option<Vec<String>>,
         cmd:Option<Vec<String>>,
         start_on_boot:Option<bool>,
         workdir:Option<String>,
+        docker_hub:Option<HPDockerHubPull>,
     }
+
+    #[derive(Deserialize,Serialize, Debug)]
+    struct HPRunContainer{
+        container:String, // in %FILES%/containers/cont.json
+    }                        
+
+    #[derive(Deserialize, Serialize, Debug)]
+    struct HPDockerHubPull{
+        image:String,
+        save_to: String,
+        arch:Option<String>,//exmpl: arm/v7 or arm
+    }
+
+
 
     impl<'a> RustAppInsideJNI<'a> {
         #[cfg(feature = "jni")]
@@ -61,7 +79,7 @@ pub mod docker_hub;
                 phantom:PhantomData,
                 packages_map: tokio::sync::Mutex::new(HashMap::new()),
                 vms: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-                files_dir:std::sync::Mutex::new(String::new()),
+                files_dir:std::sync::Mutex::new(None),
             }
         }
 
@@ -71,21 +89,45 @@ pub mod docker_hub;
                 phantom:PhantomData,
                 packages_map: tokio::sync::Mutex::new(HashMap::new()),
                 vms: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-                files_dir: std::sync::Mutex::new(String::new()),
+                files_dir: std::sync::Mutex::new(None),
             }
         }
 
-        pub fn log(&self,txt: &str)-> anyhow::Result<()>{
+
+        pub fn log_string(&self,txt: String){
+            self.log(txt.as_str());
+        }
+
+        pub fn log(&self,txt: &str){
             #[cfg(feature = "jni")]
             self.call_native_with_string(  txt  )?;
             #[cfg(not(feature = "jni"))]
-            println!("{}",txt);
-            Ok(())
+            {
+                #[cfg(feature = "kmsg_debug")]
+                {
+                    std::fs::write("/dev/kmsg_debug", txt).unwrap_or_default();
+                    std::fs::write("/proc/bootevent", txt).unwrap_or_default();                
+                }
+                println!("{}",txt);
+
+            }
+           
         }
 
 
         fn get_files_path (&self) -> anyhow::Result<String>{
-            Ok(self.files_dir.lock().unwrap().to_string().clone())
+           if let Ok(files_dir_mtx)=self.files_dir.lock(){
+                if let Some::<String>(files_dir)=&*files_dir_mtx {
+                    return Ok(files_dir.clone());
+                }else{
+                    bail!("files_dir is empty?")
+                }
+            }else{
+                bail!("files_dir lock err")
+            }
+            
+
+//            Ok(self.files_dir.lock().unwrap().unwrap().clone())
             /*
             {
                 let mut current_exe = std::env::current_exe()?;
@@ -146,7 +188,7 @@ pub mod docker_hub;
             .await?
             .bytes()
             .await?;
-            self.log("done. trying unarchive")?;
+            self.log("done. trying unarchive");
 
             Ok(packages_body)
         }
@@ -179,25 +221,25 @@ pub mod docker_hub;
 
         
         async fn unarchive_tar<R: Read> (&self, reader:R, ignore_prefix:&str)-> anyhow::Result<()>{ 
-            self.log(format!("unarchiving tar...: ").as_str())?;
+            self.log_string(format!("unarchiving tar...: "));
             let mut tar_decoder=tar::Archive::new(reader);
             tar_decoder
                 .entries()?
                 .filter_map(|e| e.ok())
                 .map(|mut entry| -> anyhow::Result<std::path::PathBuf> {
                     let path = entry.path()?.strip_prefix(ignore_prefix)?.to_owned();
-                    self.log(format!("unarchiving file: {} ", path.clone().to_str().unwrap_or("path err") ).as_str())?;
+                    self.log_string(format!("unarchiving file: {} ", path.clone().to_str().unwrap_or("path err") ));
                     entry.unpack(&path)?;
                     Ok(path)
                 })
                 .filter_map(|e|
                     match e {
-                        Err(er)=>{self.log(format!("unpack error > {}", er ).as_str()).unwrap(); None},
+                        Err(er)=>{self.log_string(format!("unpack error > {}", er )); None},
                         Ok(pt)=>{Some(pt)}
                     }
                 )
-                .for_each(|x| self.log(format!("> {}", x.display()).as_str()).unwrap() );
-                self.log(format!("unarchiving tar done. returning OK ").as_str())?;
+                .for_each(|x| self.log_string(format!("> {}", x.display())) );
+                self.log_string(format!("unarchiving tar done. returning OK "));
                 Ok(())       
         }
 
@@ -206,13 +248,13 @@ pub mod docker_hub;
             match format{
                 "tar.xz"=>{
                     //let tar_decoded=XzDecoder::new(reader);
-                    self.log(format!("trying unarchive as XZ: ").as_str())?;
+                    self.log_string(format!("trying unarchive as XZ: "));
 
                     let tar_decoded=xz::read::XzDecoder::new(reader);                    
                     self.unarchive_tar(tar_decoded,ignore_prefix).await?;
                 },
                 "tar.gz" | "tar.gzip"=>{
-                    self.log(format!("trying unarchive as GZ: ").as_str())?;
+                    self.log_string(format!("trying unarchive as GZ: "));
                     let tar_decoded=flate2::read::GzDecoder::new(reader);
                     self.unarchive_tar(tar_decoded,ignore_prefix).await?;
                 }
@@ -224,7 +266,7 @@ pub mod docker_hub;
 //            let xz_decoder=xz::read::XzDecoder::new(reader);
 
 
-            println!("Extracted the following files:");
+            self.log_string(format!("Extracted the following files:"));
 
 
             Ok(())
@@ -247,7 +289,7 @@ pub mod docker_hub;
         }
 
         async fn install_deb_with_url(&self, deb_url: String,ignore_prefix:&str) -> anyhow::Result<()>{
-            self.log("loading ar binary")?;
+            self.log("loading ar binary");
             let content =  self.load_binary_from_url(deb_url).await?;
             let mut ar_archive = ar::Archive::new(content.reader() );
 
@@ -255,7 +297,7 @@ pub mod docker_hub;
                 let  entry = entry_result?;
                 // Create a new file with the same name as the archive entry:
                 let pth=String::from_utf8(entry.header().identifier().to_vec())?;
-                self.log(format!("finded file in deb: {}",pth.clone().as_str() ).as_str())?;
+                self.log_string(format!("finded file in deb: {}",pth.clone().as_str() ));
 
 //                let mut file = std::fs::File::create(pth)?;
                 // The Entry object also acts as an io::Read, so we can easily copy the
@@ -291,18 +333,18 @@ pub mod docker_hub;
 
             if let Some(app_info) = self.packages_map.lock().await.get(app_name.as_str()) {
                     let deps_none=String::from("");
-                    self.log(format!("app {} found in database. installing...",app_name ).as_str())?;
+                    self.log_string(format!("app {} found in database. installing...",app_name ));
                     let deps=app_info.get("depends").unwrap_or( &deps_none );
 
                     let filename=app_info.get("filename").unwrap();
                     let url=format!("https://packages.termux.dev/apt/termux-main/{}",filename);
     
-                    self.log(format!("DEPS={} url={}",deps,url).as_str())?;
+                    self.log_string(format!("DEPS={} url={}",deps,url));
     
                     self.install_deb_with_url(url,"./data/data/com.termux/files").await?;
 
                 }else{
-                    self.log(format!("app {} not found in database. can't install ",app_name).as_str())?;
+                    self.log_string(format!("app {} not found in database. can't install ",app_name));
                     anyhow::bail!("app {} not found in database. can't install", app_name);
                 }
 
@@ -330,14 +372,14 @@ pub mod docker_hub;
             if self.packages_map.lock().await.len()!=0 {return Ok(())}
             let packages_url=format!("https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-{}/Packages",self.get_binary_arch());
 
-            self.log(  format!("ATTEMPT TO DOWNLOAD termux database").as_str()  )?;
+            self.log_string(  format!("ATTEMPT TO DOWNLOAD termux database"));
 
             let packages_body = reqwest::get(packages_url)
             .await?
             .text()
             .await?;
 
-            self.log(  format!("DOWNLOADED").as_str()  )?;
+            self.log_string(  format!("DOWNLOADED"));
 
             let packages_body_splitted=packages_body.split("\n\n");
             self.packages_map.lock().await.clear();
@@ -357,7 +399,7 @@ pub mod docker_hub;
                 }
                 self.packages_map.lock().await.insert(name_of_package.to_lowercase(), row_package_map);   
             }
-            self.log(  format!("termux database packages len = {}",self.packages_map.lock().await.keys().len()).as_str()  )?;
+            self.log_string(  format!("termux database packages len = {}",self.packages_map.lock().await.keys().len()));
 
             Ok(())
 
@@ -383,16 +425,16 @@ pub mod docker_hub;
 
         fn set_current_directory_to_files(&self)->anyhow::Result<()>{
             let base_path_for_app=self.get_files_path()?;
-            self.log(format!("settings current directory to {}", base_path_for_app ).as_str())?;
+            self.log_string(format!("settings current directory to {}", base_path_for_app ));
             std::env::set_current_dir(Path::new(base_path_for_app.as_str()))?;
             Ok(())
         }
 
         async fn  download_release_proot_if_needed(&self)->anyhow::Result<()>{
-            self.log("download_release_proot_if_needed executed")?;
+            self.log("download_release_proot_if_needed executed");
             self.set_current_directory_to_files()?;
 
-            let proot_tmp_dir=self.replace_path_with_env("%FILES%/proot_tmp".to_string()) ?;
+            let proot_tmp_dir=self.replace_path_with_env("%TEMP%/".to_string()) ?;
             std::env::set_var("PROOT_TMP_DIR",  proot_tmp_dir.clone() );
 
             let proot_path=Path::new(proot_tmp_dir.as_str());
@@ -400,15 +442,14 @@ pub mod docker_hub;
                 tokio::fs::create_dir_all(proot_path).await?
             }
             
-            let containers_dir=self.replace_path_with_env("%FILES%/containers".to_string())?;
+            let containers_dir=self.get_containers_directory() ?;
             let containers_dir_path=Path::new( &containers_dir ) ;
             if !containers_dir_path.exists() {
                 tokio::fs::create_dir_all(containers_dir_path).await?
             }
 
-
             if Path::new("bin/proot").exists() {return Ok(());}
-            self.log("bin/proot not found")?;
+            self.log("bin/proot not found");
 
 //            #[cfg(target_arch = "x86")]
 //            return Ok(());
@@ -424,7 +465,7 @@ pub mod docker_hub;
 //                let version="5.3.0";
 //                let down_url=format!("https://github.com/proot-me/proot/releases/download/v{}/proot-v{}-{}-static",version,version,proot_archive_arch).to_string();
                 let down_url=format!("https://raw.githubusercontent.com/waowave/build-proot-android-fork/master/packages/proot-android-{}.tar.gz",proot_archive_arch).to_string();
-                self.log(format!("install_archive_with_url ur={}",down_url).as_str())?;
+                self.log_string(format!("install_archive_with_url ur={}",down_url));
                 self.install_archive_with_url(down_url, "root").await?;
                 //self.download_url_to_file(down_url, "proot",true).await?;
             }
@@ -452,23 +493,77 @@ pub mod docker_hub;
             Ok(())
         }
 
-        fn set_files_directory_env(&self){
-            #[cfg(feature = "jni")]
-            let files_path=self.get_android_files_path().unwrap();
-            #[cfg(not(feature = "jni"))]
-            let files_path = std::env::current_dir().unwrap().to_str().unwrap().to_string();
-
-            let mut locked_str=self.files_dir.lock().unwrap();
-            locked_str.clear();
-            locked_str.push_str(&files_path);
+        pub fn set_files_directory_env_if_needed(&self){
+            if self.files_dir.lock().unwrap().is_none() {
+               self.set_files_directory_env(None);
+            }
         }
 
-//        #[cfg(feature = "jni")]
-        #[cfg(not(test))]
+        pub fn set_files_directory_env(&self,files_dir:Option<String>){
+            #[cfg(feature = "jni")]
+            let files_path_calculated=self.get_android_files_path().unwrap();
+            #[cfg(not(feature = "jni"))]
+            let files_path_calculated = std::env::current_dir().unwrap().to_str().unwrap().to_string();
+
+            let files_path;
+            if let Some(fp)=files_dir{
+                files_path=fp;
+            }else{
+                files_path=files_path_calculated;
+            }
+            let mut locked_str=self.files_dir.lock().unwrap();
+            *locked_str=Some(files_path.clone());
+
+            if !Path::new(files_path.clone().as_str()).exists(){
+                std::fs::create_dir_all(&files_path.clone()).unwrap();
+            }
+    }
+
+
+        async fn wait_internet_connection(&self)->anyhow::Result<()>{
+      //      pub const ADDRS: [&str; 2] = [
+                // - http://clients3.google.com/generate_204
+//                "clients3.google.com:80",
+                // - http://detectportal.firefox.com/success.txt
+  //              "detectportal.firefox.com:80",
+    //        ];
+
+        let client = reqwest::Client::builder()
+            .gzip(true)
+            .timeout(Duration::from_secs(10))
+            .build()?;
+
+            loop{
+                self.log_string(format!("wait_internet_connection to firefox"));
+                let res_res = 
+                    client
+                    .get("https://detectportal.firefox.com/success.txt")
+                    .send()
+                    .await;
+                if let Ok(res)= res_res{
+                    let res_tr=res.text().await;
+                    if let Ok(res_t)= res_tr{
+                        self.log_string(format!("wait_internet_connection to firefox return {}",res_t));
+                        break;
+                    }else{
+                        self.log_string(format!("bad response?..."));
+                    }
+                }else{
+                    self.log_string(format!("no internet?..."));
+                }
+                tokio::time::sleep(Duration::from_millis(30000)).await;
+            }
+
+            Ok(())
+        }
+
+
         async fn app_loop_async_main(&mut self) -> anyhow::Result<()>{
             self.set_current_directory_to_files()?;
+            self.wait_internet_connection().await?;
             self.download_release_proot_if_needed().await?;
             self.download_release_proot_rs_if_needed().await?;
+            self.run_needed_containers().await?;
             self.http_server_start().await?;
             Ok(())
         }
@@ -484,6 +579,7 @@ pub mod docker_hub;
         }
         */
 
+        
         #[cfg(test)]
         async fn app_loop_async_test(&mut self) -> anyhow::Result<()>{
             use std::time::Duration;
@@ -494,20 +590,20 @@ pub mod docker_hub;
             self.set_current_directory_to_files()?;
             self.download_release_proot_if_needed().await?;
             self.download_release_proot_rs_if_needed().await?;
-            /*
-            docket_hub.download_blobs(async move |bytes,fmt| -> anyhow::Result<()> {                
-                arced_self_clone.clone().unarchive_compressed_tar(bytes.reader(), "tar.gz", "").await?;
-                Ok(())
-            }).await?;
-            */
+
+//            docket_hub.download_blobs(async move |bytes,fmt| -> anyhow::Result<()> {                
+//                arced_self_clone.clone().unarchive_compressed_tar(bytes.reader(), "tar.gz", "").await?;
+//                Ok(())
+//            }).await?;
 
             tokio::spawn(async move {
                 sleep(Duration::from_millis(1000)).await;
                 let client = reqwest::Client::new();
                 let mut res;
                 
-                res = client.post("http://localhost:3000/api.json")
-                      .body(r#"{"cmd":"docker_hub_pull","image":"koenkk/zigbee2mqtt:latest", "save_to":"%FILES%/vms/test_vm", "arch":"arm/v7"} "#)
+                res = client.post("http://localhost:3001/api.json")
+                .body(r#"{"cmd":"docker_hub_pull","image":"nodered/node-red:latest", "save_to":"%FILES%/vms/nodered", "arch":"arm/v7"} "#)
+//                .body(r#"{"cmd":"docker_hub_pull","image":"koenkk/zigbee2mqtt:latest", "save_to":"%FILES%/vms/test_vm", "arch":"arm/v7"} "#)
 //                .body(r#"{"cmd":"docker_hub_pull","image":"zigbee2mqtt/zigbee2mqtt-armv7:latest", "save_to":"%FILES%/vms/test_vm", "arch":"arm/v7"} "#)
                     .send()
                     .await
@@ -517,7 +613,7 @@ pub mod docker_hub;
                     .unwrap();
                     println!("res={}",res);
                 
-                
+                /*
                 let ccfg:ContainerConfigJSON = ContainerConfigJSON{
                     vm_path:"%FILES%/vms/test_vm".to_string(),
                     volumes:Some(HashMap::from([
@@ -564,7 +660,7 @@ pub mod docker_hub;
                 .unwrap();
                 println!("res={}",res);
 
-
+             */
 
             });
 
@@ -586,6 +682,7 @@ pub mod docker_hub;
         }
 
 
+
         #[tokio::main(flavor = "current_thread")]
         async fn app_loop_async(&mut self) -> anyhow::Result<()>{
 
@@ -598,8 +695,10 @@ pub mod docker_hub;
             Ok(())
         }
 
+
+
         pub fn app_loop(&mut self) -> anyhow::Result<()> {
-            self.set_files_directory_env();
+            self.set_files_directory_env_if_needed();
             let _future = self.app_loop_async()?;
             Ok(())
         }
@@ -608,7 +707,34 @@ pub mod docker_hub;
             if str.is_empty() {
                 bail!("path could'nt be empty");
             }
-            Ok(str.replace("%FILES%", self.get_files_path()?.as_str()))
+
+            let files_path=self.get_files_path()?;
+            let mut outpath=str.replace("%FILES%", files_path.as_str() );
+
+            let cache_path;
+            let containers_path;
+            let tmp_path;
+
+            if Path::new("/mnt/sdcard/").exists(){
+                tmp_path=format!("/mnt/sdcard/virtual_environment/tmp/");
+                cache_path=format!("/mnt/sdcard/virtual_environment/cache/");
+                containers_path=format!("/mnt/sdcard/virtual_environment/containers/");
+            }else{
+                tmp_path=format!("{}/temp/",&files_path);
+                cache_path=format!("{}/cache/",&files_path);
+                containers_path=format!("{}/containers/",&files_path);
+            }
+
+            outpath=outpath.replace("%CACHE%", cache_path.as_str()  );
+            outpath=outpath.replace("%TMP%", tmp_path.as_str()  );
+            outpath=outpath.replace("%TEMP%", tmp_path.as_str()  );
+            outpath=outpath.replace("%CONTAINERS%", containers_path.as_str()  );
+
+//            #[cfg(target_os = "android")]
+
+            Ok(
+                outpath
+            )
         }
 
         pub async fn vm_add_app(&self,vm_name:String, exe:String,args:Vec<String>, envs_p: HashMap<String,String>) -> anyhow::Result<()>{            
@@ -624,7 +750,7 @@ pub mod docker_hub;
                 anyhow::bail!("vm with name {} already exists", vm_name)
             }
             let exe_replaced=self.replace_path_with_env(exe)?;
-            let args_replaced:Vec<String>=args.iter().map(move |s| {println!("arg=[{}]",s); return  if s.is_empty() { "".to_string() } else { self.replace_path_with_env(s.clone()).unwrap() }} ).collect();
+            let args_replaced:Vec<String>=args.iter().map(move |s| {self.log_string(format!("arg=[{}]",s)); return  if s.is_empty() { "".to_string() } else { self.replace_path_with_env(s.clone()).unwrap() }} ).collect();
 
                 if let Ok(mut container_info_f) = tokio::fs::File::open(".container_info.json").await{
                     let mut container_info_str=String::new();
@@ -650,7 +776,7 @@ pub mod docker_hub;
 //            let args_replaced:Vec<String>=args.iter().map(move |s| self.replace_path_with_env(s.clone()).unwrap()).collect();
 
 
-            self.log( format!("starting vm exe={} args={:?} envs={:?}",exe_replaced.clone(),args_replaced.clone(),envs.clone()).as_str() )?;
+            self.log_string( format!("starting vm exe={} args={:?} envs={:?}",exe_replaced.clone(),args_replaced.clone(),envs.clone()));
 
             let vm=VM::new( exe_replaced,args_replaced,envs ).await?;
             vm_mtx.insert(vm_name.to_string(), Arc::new(tokio::sync::Mutex::new(vm)) );
@@ -667,10 +793,10 @@ pub mod docker_hub;
             if vm_name.is_empty() {
                 bail!("vm_name could'nt be empty");
             }
-            self.log(format!("VM {} problem: {}",vm_name ,err_text).as_str() )?;
+            self.log_string(format!("VM {} problem: {}",vm_name ,err_text));
             if let Some ( (finded_vm_name,finded_vm) ) = self.vms.lock().await.remove_entry(vm_name.as_str()){
-                self.log(format!("sending stop signal to vm: {}",finded_vm_name).as_str())?;
-                finded_vm.clone().lock().await.stop(err_text.clone().as_str()); 
+                self.log_string(format!("sending stop signal to vm: {}",finded_vm_name));
+                finded_vm.clone().lock().await.stop(err_text.clone().as_str()).await; 
             }
             Ok(())
         }
@@ -764,12 +890,344 @@ pub mod docker_hub;
             Ok((files_copied,dirs_copied,bytes_copied))
         }
 
+        fn get_containers_directory(&self)->anyhow::Result<String>{
+            Ok(self.replace_path_with_env("%CONTAINERS%/".to_string())?)
+        }
+
         fn get_container_config_filename(&self,container:&str)->anyhow::Result<String>{
             if container.is_empty(){
                 bail!("container name could'nt be empty")
             }
-            Ok(format!("{}/{}.json", self.replace_path_with_env("%FILES%/containers/".to_string())?,container).to_string())
+            Ok(format!("{}/{}.json", self.get_containers_directory()? ,container).to_string())
         }
+
+
+        async fn run_needed_containers(&self)->anyhow::Result<()>{
+        let  rdr= tokio::fs::read_dir( self.get_containers_directory()? ).await;
+        if rdr.is_err(){ return Ok(());}
+        let mut rd=rdr.unwrap();
+        while let Ok(dir_entry) = rd.next_entry().await {
+                if dir_entry.is_none(){break;}
+                let dir_entry=dir_entry.unwrap();
+                let dir_path=dir_entry.path();
+                let stem=dir_path.file_stem();
+                if stem.is_none(){continue;}
+                let stem=stem.unwrap().to_str();
+                if stem.is_none(){continue;}
+                let stem=stem.unwrap();
+                let jfile=tokio::fs::read(&dir_path).await;
+                if jfile.is_err(){continue;}
+                let container_conf = serde_json::from_slice::<ContainerConfigJSON>(&jfile.unwrap());
+                if container_conf.is_err(){continue;}
+                let container_conf=container_conf.unwrap();
+                if container_conf.start_on_boot.is_none() {continue;}
+                if container_conf.start_on_boot.unwrap(){
+                    self.log_string(format!("running container {}",stem));
+                    let hpr=HPRunContainer{
+                        container: String::from_str(stem)?,
+                    };
+                    let run_cont_res = self.httpfunc_run_container(hpr).await;
+                    match run_cont_res{
+                        Ok(o)=>{ self.log_string(format!("running container {} result = {}", stem,o  )) },
+                        Err(e)=>{ self.log_string(format!("running container {} error = {}", stem,e  )) },
+                    }        
+                }
+            }
+            self.log("run_needed_containers OK");
+            Ok(())
+        }
+
+
+
+        async fn httpfunc_docker_hub_pull(&self,params:HPDockerHubPull)-> anyhow::Result<bool>{
+            let replaced_path=self.replace_path_with_env(params.save_to)?;
+            let p=Path::new(replaced_path.as_str());
+            if !p.exists(){
+                tokio::fs::create_dir_all(p).await?;
+            }
+            
+            std::env::set_current_dir(p)?;
+
+            self.docker_hub_pull(params.image,params.arch).await?;
+
+            Ok(true)
+        }
+        
+        async fn httpfunc_run_container(&self,params:HPRunContainer) -> anyhow::Result<bool>{
+            let json_filename= self.get_container_config_filename(&params.container)?;
+            let json_file=tokio::fs::read(json_filename).await?;
+            let container_conf:ContainerConfigJSON=serde_json::from_slice(&json_file)?;
+
+            let fs_vm_path=self.replace_path_with_env(container_conf.vm_path.clone())?;
+            if ! Path::new(&fs_vm_path).exists(){
+                self.log_string(format!("run_container... path: {} not found", &fs_vm_path ));                
+                if let Some(mut docker_hub_cfg) = container_conf.docker_hub{
+                    docker_hub_cfg.save_to=fs_vm_path.clone();
+                    self.httpfunc_docker_hub_pull( docker_hub_cfg ).await?;
+                }
+            }
+            
+            let mut envs:HashMap<String,String> = HashMap::new();
+            let mut create_vm_params:Vec<String>=Vec::new();
+
+            envs.insert("SHELL".to_string(), "/bin/sh".to_string() );
+            envs.insert("HOME".to_string(), "/root".to_string() );
+            envs.insert("USER".to_string(), "root".to_string() );
+            envs.insert("TMPDIR".to_string(), "/var/tmp".to_string() );
+            envs.insert("PATH".to_string(), "/usr/bin:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin".to_string() );
+            
+
+            enum VmRunMode{
+                ProotRS,
+                ProotCPP,
+                Chroot,
+            }
+
+            let vm_mode;
+            
+            vm_mode=match container_conf.chroot_mode.as_str(){
+                "proot_rs" => VmRunMode::ProotRS,
+                "proot_cpp" => VmRunMode::ProotCPP,
+                "chroot" => VmRunMode::Chroot,
+                _=> bail!("incorrect chroot mode") //VmRunMode::Chroot,
+            };
+
+
+            let create_vm_exe;
+            let mut mounting_points=HashMap::new();
+        
+            ["/dev","/proc","/sys","/mnt"]
+                .iter()
+                .for_each(|&f| {
+                    mounting_points.insert(f.clone().to_string(),f.clone().to_string());
+                }
+            );
+
+
+            if let Some(vols)=container_conf.volumes {
+                for (vol_k,vol_v) in vols {
+                    let vol_path_str=self.replace_path_with_env(vol_k)?;
+                    //let vol_path=Path::new(&vol_path_str);
+                    mounting_points.insert(vol_path_str.to_string(),vol_v.clone());                                                                
+                }
+            }
+
+            let mut should_umount_when_err: Vec<String>=Vec::new();
+
+
+            for (vol_from,vol_to) in mounting_points {
+
+                let vol_from_path=Path::new(vol_from.as_str());
+                if !vol_from_path.exists(){
+                    tokio::fs::create_dir_all(vol_from_path).await?;
+                }
+
+                let vol_to_in_real_fs=vec![ fs_vm_path.as_str(),  vol_to.as_str() ].join("/");
+                let vol_to_path_in_real_fs=Path::new(vol_to_in_real_fs.as_str());
+                if !vol_to_path_in_real_fs.exists(){
+                    tokio::fs::create_dir_all(vol_to_path_in_real_fs).await?;
+                }
+
+                self.log_string(format!("mounting {} to {}",&vol_from,&vol_to_in_real_fs));
+
+                match vm_mode{
+                    VmRunMode::ProotRS | VmRunMode::ProotCPP => {
+                        create_vm_params.push("-b".to_string());
+                        create_vm_params.push(format!("{}:{}",vol_from,vol_to).to_string());            
+                    },
+                    #[cfg(target_os = "macos")]
+                    VmRunMode::Chroot => {}
+
+                    #[cfg(not(target_os = "macos"))]
+                    VmRunMode::Chroot => {
+                        //try umount if mounted
+                        
+                        let ures=umount(vol_to_path_in_real_fs);
+                        if let Err(uer)=ures{
+                            self.log_string(format!("umount(if mounted) => ({}) err = {}", &vol_to_in_real_fs ,uer ));
+                        }
+
+                        //mounting                                    
+                        let mount_res = mount(
+                            Some( vol_from_path ),
+                            vol_to_path_in_real_fs,
+                            None::<&Path>,
+                            MsFlags::MS_BIND,
+                            None::<&Path>,
+                        );
+
+                        match mount_res{
+                            Ok(_o)=>{
+                                should_umount_when_err.push(vol_to_in_real_fs);
+                            },
+                            Err(e)=>{
+                                self.log_string(format!("mount err={}",e));
+                                for umount_path in should_umount_when_err {
+                                    let p=Path::new(&umount_path);
+                                    let ures=umount(p);
+                                    if let Err(uer)=ures{
+                                        self.log_string(format!("umount({}) err = {}", &umount_path ,uer ));
+                                    }
+                                }
+                                break;
+                            },
+                        }
+                    }                                    
+                }
+            }
+
+            //pass path with vm to parameters
+
+            match vm_mode{
+                VmRunMode::ProotRS | VmRunMode::ProotCPP => {
+                    create_vm_params.push("-r".to_string());
+                    create_vm_params.push( fs_vm_path  );       
+                },
+                VmRunMode::Chroot => {
+                    create_vm_params.push( fs_vm_path  );
+                },
+            }
+
+
+            let mut create_vm_params_for_bash=Vec::<String>::new();
+            
+            if let VmRunMode::Chroot = vm_mode {
+                create_vm_params.push( "sh".to_string() );
+                create_vm_params.push( "-c".to_string() );
+                create_vm_params_for_bash.push( "echo 'chroot from xao'".to_string() );
+            }
+
+
+
+            let workdir;
+
+            let mut dockerhub_config=None;
+
+            let dockerhub_config_file=self.replace_path_with_env( format!("{}/.container_info.json",container_conf.vm_path.clone()).to_string() )?;
+            if let Ok(dockerfile_config_file_data)=tokio::fs::read(&dockerhub_config_file).await {
+                let dockerhub_config_d:JConfigConfig=serde_json::from_slice(  &dockerfile_config_file_data )?;
+                dockerhub_config=Some(dockerhub_config_d);
+            }
+            //workdir
+            let default_workdir="/".to_string();
+
+            if let Some(workdir_c)=container_conf.workdir {
+                workdir=workdir_c.clone();
+            }else{
+                if let Some(dcfg)=&dockerhub_config {
+                    if ! dcfg.working_dir.is_empty(){
+                        workdir=dcfg.working_dir.clone();
+                    }else{
+                        workdir=default_workdir;
+                    }
+                }else{
+                    workdir=default_workdir;
+                }
+            }
+
+            //setting workdir as parameter
+            match vm_mode{
+                VmRunMode::ProotRS | VmRunMode::ProotCPP => {
+                    create_vm_params.push("-w".to_string());
+                    create_vm_params.push( workdir );
+                },
+                VmRunMode::Chroot => {
+                    create_vm_params_for_bash.push("&& cd".to_string());
+                    create_vm_params_for_bash.push( workdir );
+                },
+            }
+
+
+
+
+            //envs 
+            //from dockerhub_conf
+            if let Some(dcfg)=&dockerhub_config {
+                dcfg.env.iter().for_each(|f|{
+                        let dcfg_env_spl:Vec<&str> = f.split("=") .collect();
+                        if dcfg_env_spl.len()==2{
+                            envs.insert(dcfg_env_spl[0].to_string(), dcfg_env_spl[1].to_string());
+                        }                                    
+                    }
+                );
+            }
+
+            //from container conf
+            if let Some(envs_c)=container_conf.envs {
+                for (env_k,env_v) in envs_c{
+                    envs.insert(env_k.clone(), env_v.clone());
+                }                            
+            }
+
+            //entrypoints and cmd 
+            let mut entrypoint=vec!["/bin/sh".to_string()];
+            let mut cmd=vec![];
+            //getting entrypoints and cmd from dockerhub conf
+            if let Some(dcfg)=&dockerhub_config{
+                if let Some(dcfg_ep)=&dcfg.entrypoint{
+                    entrypoint=dcfg_ep.clone();
+                }
+                if let Some(dcfg_cmd)=&dcfg.cmd{
+                    cmd=dcfg_cmd.clone();
+                }
+            }
+            //replacing entrypoint and if they exists in container conf
+
+            if let Some(ccfg_ep)=&container_conf.entrypoint{
+                entrypoint=ccfg_ep.clone();
+            }
+            if let Some(ccfg_cmd)=&container_conf.cmd{
+                cmd=ccfg_cmd.clone();
+            }
+
+            match vm_mode{
+                VmRunMode::ProotRS=>{
+                    create_vm_params.push("--".to_string());
+                    create_vm_exe=self.replace_path_with_env("%FILES%/proot-rs".to_string())?;
+                },
+                VmRunMode::ProotCPP=>{
+                    create_vm_params.push("--kill-on-exit".to_string());
+                    create_vm_params.push("-0".to_string());
+                    create_vm_exe=self.replace_path_with_env("%FILES%/bin/proot".to_string())?;
+                },
+                VmRunMode::Chroot=>{
+                    create_vm_exe="chroot".to_string();
+
+                }
+
+            }
+
+            //cmd and entrypoint
+
+            match vm_mode{
+                VmRunMode::ProotRS | VmRunMode::ProotCPP => {
+                    create_vm_params.extend(entrypoint);
+                    create_vm_params.extend(cmd);
+                },
+                VmRunMode::Chroot => {
+                    create_vm_params_for_bash.push("&& ".to_string());
+                    create_vm_params_for_bash.extend(entrypoint);
+                    create_vm_params_for_bash.extend(cmd);
+
+                    create_vm_params.push(
+                        create_vm_params_for_bash.join(" ")
+                    )
+                },
+            }
+
+
+            self.vm_add_app(
+                format!("container_{}",params.container).to_string(),
+                create_vm_exe,
+                create_vm_params,
+                envs
+            ).await?;
+
+
+            Ok(true)
+        }
+
+
 
 
         pub async fn http_server_fn_json_api(&self,req: hyper::Request<HIncomingBody>)  ->  HResult<hyper::Response<HBoxBody>> {
@@ -901,279 +1359,9 @@ pub mod docker_hub;
                     },
 
                     "run_container"=>{
-                        #[derive(Deserialize, Debug)]
-                        struct HPRunContainer{
-                            container:String, // in %FILES%/containers/cont.json
-                            chroot_mode:Option<String>,
-                        }                        
-
                         let params:HPRunContainer = serde_json::from_value(data.clone())?;
-                        let json_filename= self.get_container_config_filename(&params.container)?;
-                        let json_file=tokio::fs::read(json_filename).await?;
-                        let container_conf:ContainerConfigJSON=serde_json::from_slice(&json_file)?;
-//                        println!("OKKK!");
-
-                        let mut envs:HashMap<String,String> = HashMap::new();
-                        let mut create_vm_params:Vec<String>=Vec::new();
-
-                        envs.insert("SHELL".to_string(), "/bin/sh".to_string() );
-                        envs.insert("HOME".to_string(), "/root".to_string() );
-                        envs.insert("USER".to_string(), "root".to_string() );
-                        envs.insert("TMPDIR".to_string(), "/var/tmp".to_string() );
-                        envs.insert("PATH".to_string(), "/usr/bin:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin".to_string() );
-                        
-
-                        enum VmRunMode{
-                            ProotRS,
-                            ProotCPP,
-                            Chroot,
-                        }
-
-                        let vm_mode;
-                        
-                        if let Some(ver)=params.chroot_mode{
-                            vm_mode=match ver.as_str(){
-                                "proot_rs" => VmRunMode::ProotRS,
-                                "proot_cpp" => VmRunMode::ProotCPP,
-                                "chroot" => VmRunMode::Chroot,
-                                _=>VmRunMode::Chroot,
-                            }
-                        }else{
-                            vm_mode=VmRunMode::Chroot;
-                        }
-
-
-                        let create_vm_exe;
-//                        let create_vm_exe= self.replace_path_with_env("%FILES%/bin/proot".to_string())?;
-                       // let create_vm_exe= self.replace_path_with_env("%FILES%/proot-rs".to_string())?;
-
-                        let mut mounting_points=HashMap::new();
-                    
-                        ["/dev","/proc","/sys","/mnt"]
-                            .iter()
-                            .for_each(|&f| {
-                                mounting_points.insert(f.clone().to_string(),f.clone().to_string());
-                            }
-                        );
-
-
-                        if let Some(vols)=container_conf.volumes {
-                            for (vol_k,vol_v) in vols {
-                                let vol_path_str=self.replace_path_with_env(vol_k)?;
-                                //let vol_path=Path::new(&vol_path_str);
-                                mounting_points.insert(vol_path_str.to_string(),vol_v.clone());                                                                
-                            }
-                        }
-
-                        let mut should_umount_when_err: Vec<String>=Vec::new();
-                        let fs_vm_path=self.replace_path_with_env(container_conf.vm_path.clone())?;
-
-
-                        for (vol_from,vol_to) in mounting_points {
-
-                            let vol_from_path=Path::new(vol_from.as_str());
-                            if !vol_from_path.exists(){
-                                tokio::fs::create_dir_all(vol_from_path).await?;
-                            }
-
-                            let vol_to_in_real_fs=vec![ fs_vm_path.as_str(),  vol_to.as_str() ].join("/");
-                            let vol_to_path_in_real_fs=Path::new(vol_to_in_real_fs.as_str());
-                            if !vol_to_path_in_real_fs.exists(){
-                                tokio::fs::create_dir_all(vol_to_path_in_real_fs).await?;
-                            }
-
-                            println!("mounting {} to {}",&vol_from,&vol_to_in_real_fs);
-
-                            match vm_mode{
-                                VmRunMode::ProotRS | VmRunMode::ProotCPP => {
-                                    create_vm_params.push("-b".to_string());
-                                    create_vm_params.push(format!("{}:{}",vol_from,vol_to).to_string());            
-                                },
-                                VmRunMode::Chroot => {
-                                    //try umount if mounted
-                                    
-                                    let ures=umount(vol_to_path_in_real_fs);
-                                    if let Err(uer)=ures{
-                                        println!("umount(if mounted) => ({}) err = {}", &vol_to_in_real_fs ,uer );
-                                    }
-
-                                    //mounting                                    
-                                    let mount_res = mount(
-                                        Some( vol_from_path ),
-                                        vol_to_path_in_real_fs,
-                                        None::<&Path>,
-                                        MsFlags::MS_BIND,
-                                        None::<&Path>,
-                                    );
-
-                                    match mount_res{
-                                        Ok(_o)=>{
-                                            should_umount_when_err.push(vol_to_in_real_fs);
-                                        },
-                                        Err(e)=>{
-                                            println!("mount err={}",e);
-                                            for umount_path in should_umount_when_err {
-                                                let p=Path::new(&umount_path);
-                                                let ures=umount(p);
-                                                if let Err(uer)=ures{
-                                                    println!("umount({}) err = {}", &umount_path ,uer );
-                                                }
-                                            }
-                                            break;
-                                        },
-                                    }
-                                }                                    
-                            }
-                        }
-
-                        //pass path with vm to parameters
-
-                        match vm_mode{
-                            VmRunMode::ProotRS | VmRunMode::ProotCPP => {
-                                create_vm_params.push("-r".to_string());
-                                create_vm_params.push( fs_vm_path  );       
-                            },
-                            VmRunMode::Chroot => {
-                                create_vm_params.push( fs_vm_path  );
-                            },
-                        }
-
-
-                        let mut create_vm_params_for_bash=Vec::<String>::new();
-                        
-                        if let VmRunMode::Chroot = vm_mode {
-                            create_vm_params.push( "sh".to_string() );
-                            create_vm_params.push( "-c".to_string() );
-                            create_vm_params.push( "echo 'chroot from xao'".to_string() );
-                        }
-
-
-
-                        let workdir;
-
-                        let mut dockerhub_config=None;
-
-                        let dockerhub_config_file=self.replace_path_with_env( format!("{}/.container_info.json",container_conf.vm_path.clone()).to_string() )?;
-                        if let Ok(dockerfile_config_file_data)=tokio::fs::read(&dockerhub_config_file).await {
-                            let dockerhub_config_d:JConfigConfig=serde_json::from_slice(  &dockerfile_config_file_data )?;
-                            dockerhub_config=Some(dockerhub_config_d);
-                        }
-                        //workdir
-                        let default_workdir="/root".to_string();
-
-                        if let Some(workdir_c)=container_conf.workdir {
-                            workdir=workdir_c.clone();
-                        }else{
-                            if let Some(dcfg)=&dockerhub_config {
-                                if ! dcfg.working_dir.is_empty(){
-                                    workdir=dcfg.working_dir.clone();
-                                }else{
-                                    workdir=default_workdir;
-                                }
-                            }else{
-                                workdir=default_workdir;
-                            }
-                        }
-
-                        //setting workdir as parameter
-                        match vm_mode{
-                            VmRunMode::ProotRS | VmRunMode::ProotCPP => {
-                                create_vm_params.push("-w".to_string());
-                                create_vm_params.push( workdir );
-                            },
-                            VmRunMode::Chroot => {
-                                create_vm_params_for_bash.push("&& cd".to_string());
-                                create_vm_params_for_bash.push( workdir );
-                            },
-                        }
-
-
-
-
-                        //envs 
-                        //from dockerhub_conf
-                        if let Some(dcfg)=&dockerhub_config {
-                            dcfg.env.iter().for_each(|f|{
-                                    let dcfg_env_spl:Vec<&str> = f.split("=") .collect();
-                                    if dcfg_env_spl.len()==2{
-                                        envs.insert(dcfg_env_spl[0].to_string(), dcfg_env_spl[1].to_string());
-                                    }                                    
-                                }
-                            );
-                        }
-
-                        //from container conf
-                        if let Some(envs_c)=container_conf.envs {
-                            for (env_k,env_v) in envs_c{
-                                envs.insert(env_k.clone(), env_v.clone());
-                            }                            
-                        }
-
-                        //entrypoints and cmd 
-                        let mut entrypoint=vec!["/bin/sh".to_string()];
-                        let mut cmd=vec![];
-                        //getting entrypoints and cmd from dockerhub conf
-                        if let Some(dcfg)=&dockerhub_config{
-                            if let Some(dcfg_ep)=&dcfg.entrypoint{
-                                entrypoint=dcfg_ep.clone();
-                            }
-                            if let Some(dcfg_cmd)=&dcfg.cmd{
-                                cmd=dcfg_cmd.clone();
-                            }
-                        }
-                        //replacing entrypoint and if they exists in container conf
-
-                        if let Some(ccfg_ep)=&container_conf.entrypoint{
-                            entrypoint=ccfg_ep.clone();
-                        }
-                        if let Some(ccfg_cmd)=&container_conf.cmd{
-                            cmd=ccfg_cmd.clone();
-                        }
-
-                        match vm_mode{
-                            VmRunMode::ProotRS=>{
-                                create_vm_params.push("--".to_string());
-                                create_vm_exe=self.replace_path_with_env("%FILES%/proot-rs".to_string())?;
-                            },
-                            VmRunMode::ProotCPP=>{
-                                create_vm_params.push("--kill-on-exit".to_string());
-                                create_vm_params.push("-0".to_string());
-                                create_vm_exe=self.replace_path_with_env("%FILES%/bin/proot".to_string())?;
-                            },
-                            VmRunMode::Chroot=>{
-                                create_vm_exe="chroot".to_string();
-
-                            }
-
-                        }
-
-                        //cmd and entrypoint
-
-                        match vm_mode{
-                            VmRunMode::ProotRS | VmRunMode::ProotCPP => {
-                                create_vm_params.extend(entrypoint);
-                                create_vm_params.extend(cmd);
-                            },
-                            VmRunMode::Chroot => {
-                                create_vm_params_for_bash.push("&& ".to_string());
-                                create_vm_params_for_bash.extend(entrypoint);
-                                create_vm_params_for_bash.extend(cmd);
-
-                                create_vm_params.push(
-                                    create_vm_params_for_bash.join(" ")
-                                )
-                            },
-                        }
-
-
-                        self.vm_add_app(
-                            format!("container_{}",params.container).to_string(),
-                            create_vm_exe,
-                            create_vm_params,
-                            envs
-                        ).await?;
-
-                        command_result=true;
+                        let r = self.httpfunc_run_container(params).await?;
+                        command_result=r;
                     }
 
                     "create_vm"=>{
@@ -1241,24 +1429,8 @@ pub mod docker_hub;
                         }
                     },
                     "docker_hub_pull"=>{
-                        #[derive(Deserialize, Debug)]
-                        struct HPDockerHubPull{
-                            image:String,
-                            save_to: String,
-                            arch:Option<String>,//exmpl: arm/v7 or arm
-                        }
                         let params:HPDockerHubPull = serde_json::from_value(data.clone())?;
-
-                        let replaced_path=self.replace_path_with_env(params.save_to)?;
-                        let p=Path::new(replaced_path.as_str());
-                        if !p.exists(){
-                            tokio::fs::create_dir_all(p).await?;
-                        }
-                        
-                        std::env::set_current_dir(p)?;
-
-                        self.docker_hub_pull(params.image,params.arch).await?;
-                        command_result=true;                        
+                        command_result=self.httpfunc_docker_hub_pull(params).await?;
                     },                   
                      "download_url_to_file"=>{
                         #[derive(Deserialize, Debug)]
@@ -1311,14 +1483,14 @@ pub mod docker_hub;
             let mut docker_hub = DockerHub::new(
                 cont_name,
                 version,
-                self.replace_path_with_env("%FILES%/cache/docker_hub".to_string())?,
+                self.replace_path_with_env("%CACHE%/docker_hub".to_string())?,
                 arch
                 )?;
  
             let (layers,container_conf_opt)=docker_hub.get_layers_urls(None).await?;
 
             for (layer_url,layer_format)  in layers{
-                self.log(format!("unarchiving blob {} with type {}",layer_url,layer_format).as_str())?;
+                self.log_string(format!("unarchiving blob {} with type {}",layer_url,layer_format));
                 let bin=docker_hub.download_blob(layer_url).await?;
                 self.unarchive_compressed_tar(bin.reader(), "tar.gz", "").await?;
             }
@@ -1390,7 +1562,7 @@ pub mod docker_hub;
                             )
                         .await
                     {
-                        println!("Error serving connection: {:?}", err);
+                        self.log_string(format!("Error serving connection: {:?}", err));
                     }
             }            
         }
@@ -1403,7 +1575,7 @@ pub mod docker_hub;
 
 
 
-/*
+
 #[cfg(test)]
 mod tests {
     use crate::rust_jni_app::RustAppInsideJNI;
@@ -1411,7 +1583,8 @@ mod tests {
     #[cfg(not(feature = "jni"))]
     fn  it_works() {
         let mut app = RustAppInsideJNI::new();
+        app.set_files_directory_env(Some("/Users/alex/AndroidStudioProjects/MyApplication/app/src/main/cpp/TESTING_TMP_DIR/".to_string()));
         app.app_loop().unwrap();
     }
 }
- */
+ 

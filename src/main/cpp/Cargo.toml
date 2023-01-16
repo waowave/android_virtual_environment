@@ -10,7 +10,7 @@ edition = "2021"
 [dependencies]
 jni = "~0.20"
 #futures = "~0.3"
-reqwest = {version="~0.11",features=["rustls-tls"],default-features = false}
+reqwest = {version="~0.11",features=["rustls-tls","gzip","brotli","deflate","json","multipart"],default-features = false}
 hyper = { git = "https://github.com/hyperium/hyper/", features=["full"] } 
 anyhow = "~1"
 tokio = { version = "~1.24", features = ["rt", "macros", "process", "io-util", "io-std", "fs"] }
@@ -30,6 +30,7 @@ nix = { version="~0.26",features= ["mount"] }
 [features]
 jni = [] # feature has no explicit dependencies
 bin = [] # feature has no explicit dependencies
+kmsg_debug = [] 
 
 #[workspace]
 
@@ -50,8 +51,8 @@ required-features = ["jni"]
 
 [profile.release]
 strip = true
-opt-level = 3
-lto = true
+#opt-level = 3
+#lto = true
 
 
 
