@@ -13,7 +13,7 @@ pub mod docker_hub;
     use http_body_util::BodyExt;
     use serde::{Deserialize, Serialize};
     use tokio::io::{AsyncWriteExt, AsyncReadExt};
-    use std::{io::prelude::*, time::Duration, str::FromStr};
+    use std::{io::prelude::*, time::Duration, str::FromStr, collections::HashSet};
 
     use bytes::{Bytes, Buf};
     use hyper::Method;
@@ -220,48 +220,104 @@ pub mod docker_hub;
 
 
         
-        async fn unarchive_tar<R: Read> (&self, reader:R, ignore_prefix:&str)-> anyhow::Result<()>{ 
+        async fn unarchive_tar<R: Read> (&self, reader:R, ignore_prefix:&str,skip_unarchive: bool, unarchive_only: Option<&HashSet<String>>  )-> anyhow::Result<Vec<String>>{ 
             self.log_string(format!("unarchiving tar...: "));
+            let mut errors_count=0;
+            let mut last_error_text=String::new();
+            //let mut return_file_list:Vec<String>=Vec::new();
             let mut tar_decoder=tar::Archive::new(reader);
-            tar_decoder
+            let maps_return:Vec<String>=tar_decoder
                 .entries()?
                 .filter_map(|e| e.ok())
-                .map(|mut entry| -> anyhow::Result<std::path::PathBuf> {
-                    let path = entry.path()?.strip_prefix(ignore_prefix)?.to_owned();
-                    self.log_string(format!("unarchiving file: {} ", path.clone().to_str().unwrap_or("path err") ));
-                    entry.unpack(&path)?;
-                    Ok(path)
-                })
+                .filter_map(|mut entry| { //-> Option<std::path::PathBuf>  
+                    let orig_path=entry.path();//.unwrap().to_owned();
+                    if orig_path.is_err() {return None;}
+                    let orig_path=orig_path.unwrap();
+                    let orig_path_string=orig_path.to_str().unwrap().to_string();
+
+                    let path = orig_path.strip_prefix(ignore_prefix).unwrap_or(&orig_path).to_owned();
+
+                    let allow_unarchive_this_file;
+                    if let Some(hs)= unarchive_only{
+                        if hs.contains(&orig_path_string){
+                            allow_unarchive_this_file=true;
+                        }else{
+                            allow_unarchive_this_file=false;
+                        }
+                    }else{
+                        allow_unarchive_this_file=true;
+                    }
+
+                    if allow_unarchive_this_file {
+                        if skip_unarchive{
+                            if path.exists(){
+                                if let Err(e) = std::fs::remove_file(&path) {
+                                    errors_count=errors_count+1;
+                                    last_error_text=format!("unpack error = {} filename={}",&e, path.display() );
+                                }
+                            }
+                            let unpack_res=entry.unpack(&path);
+                            match unpack_res{
+                                Err(e)=>{  
+                                    errors_count=errors_count+1;
+                                    last_error_text=format!("unpack error = {} filename={}",&e, path.display() );
+                                    None
+                                },
+                                Ok(_o_)=>{                                 
+                                   /*  return_file_list.push(orig_path_string.clone());*/  Some( orig_path_string )
+                                },
+                            }
+                        }else{
+                           /* return_file_list.push(orig_path_string.clone()); */ Some( orig_path_string )
+                        }
+                        
+                    }else{
+                        return None;
+                    }
+
+//                    self.log_string(format!("unarchiving file: {} ", path.clone().to_str().unwrap_or("path err") ));
+
+                    
+//                    Ok(path)
+                }).collect();
+                /*
                 .filter_map(|e|
                     match e {
                         Err(er)=>{self.log_string(format!("unpack error > {}", er )); None},
                         Ok(pt)=>{Some(pt)}
                     }
                 )
-                .for_each(|x| self.log_string(format!("> {}", x.display())) );
+                */
+
+//                .for_each(|x| self.log_string(format!("> {}", &x )) );
+                if errors_count!=0{
+                    self.log_string(format!("unarchive errors count={} last err={} ",errors_count,last_error_text));
+                }
                 self.log_string(format!("unarchiving tar done. returning OK "));
-                Ok(())       
+                Ok(maps_return)
         }
 
-        async fn unarchive_compressed_tar<R: Read> (&self, reader:R, format: &str,ignore_prefix:&str)-> anyhow::Result<()>{ 
-
+        async fn unarchive_compressed_tar<R: Read> (&self, reader:R, format: &str,ignore_prefix:&str,skip_unarchive: bool, unarchive_only: Option<&HashSet<String>>)-> anyhow::Result<Vec<String>>{ 
+            let ret;
             match format{
                 "tar.xz"=>{
                     //let tar_decoded=XzDecoder::new(reader);
                     self.log_string(format!("trying unarchive as XZ: "));
 
                     let tar_decoded=xz::read::XzDecoder::new(reader);                    
-                    self.unarchive_tar(tar_decoded,ignore_prefix).await?;
+                    ret=self.unarchive_tar(tar_decoded,ignore_prefix,skip_unarchive,unarchive_only).await?;
                 },
                 "tar.gz" | "tar.gzip"=>{
                     self.log_string(format!("trying unarchive as GZ: "));
                     let tar_decoded=flate2::read::GzDecoder::new(reader);
-                    self.unarchive_tar(tar_decoded,ignore_prefix).await?;
+                    ret=self.unarchive_tar(tar_decoded,ignore_prefix,skip_unarchive,unarchive_only).await?;
                 }
 
 //                "tar.xz"=>{tar_decoded=xz::read::XzDecoder::new(reader);}
 //                "tar.gz"=>{tar_decoded=async_compression::tokio::bufread::GzipDecoder::new(reader);}
-                _ =>{}
+                _ =>{
+                    bail!("unknown format for unarchive_compressed_tar ({})",format)
+                }
             }
 //            let xz_decoder=xz::read::XzDecoder::new(reader);
 
@@ -269,23 +325,26 @@ pub mod docker_hub;
             self.log_string(format!("Extracted the following files:"));
 
 
-            Ok(())
+            Ok(ret)
         }
 
 
-        async fn install_archive_with_url(&self, arc_url: String,ignore_prefix:&str) -> anyhow::Result<()>{
+        async fn install_archive_with_url(&self, arc_url: String,ignore_prefix:&str,skip_unarchive: bool, unarchive_only: Option<&HashSet<String>>) -> anyhow::Result<Vec<String>>{
             let content =  self.load_binary_from_url(arc_url.clone()).await?;
+            let ret;
             if arc_url.ends_with("tar.xz"){
                 let endfmt="tar.xz";
-                self.unarchive_compressed_tar(content.reader(),endfmt,ignore_prefix).await?;
+                ret=self.unarchive_compressed_tar(content.reader(),endfmt,ignore_prefix,skip_unarchive,unarchive_only).await?;
             }else if arc_url.ends_with("tar.gz"){
                 let endfmt="tar.gz";
-                self.unarchive_compressed_tar(content.reader(),endfmt,ignore_prefix).await?;
+                ret=self.unarchive_compressed_tar(content.reader(),endfmt,ignore_prefix,skip_unarchive,unarchive_only).await?;
             }else if arc_url.ends_with("tar"){
-                self.unarchive_tar(content.reader(),ignore_prefix).await?;
+                ret=self.unarchive_tar(content.reader(),ignore_prefix,skip_unarchive,unarchive_only).await?;
+            }else{
+                bail!("unknown format for install_archive_with_url ({})",arc_url)
             }
 
-            Ok(())
+            Ok(ret)
         }
 
         async fn install_deb_with_url(&self, deb_url: String,ignore_prefix:&str) -> anyhow::Result<()>{
@@ -309,9 +368,9 @@ pub mod docker_hub;
 //                let buf_reader=tokio::io::BufReader::new(bfu8);
 
                 if pth.contains("data.tar.xz") {
-                    self.unarchive_compressed_tar(entry,"tar.xz",ignore_prefix).await?;
+                    self.unarchive_compressed_tar(entry,"tar.xz",ignore_prefix,false,None).await?;
                 }else if pth.contains("data.tar.gz") {
-                    self.unarchive_compressed_tar(entry,"tar.gz",ignore_prefix).await?;
+                    self.unarchive_compressed_tar(entry,"tar.gz",ignore_prefix,false,None).await?;
                 }
 
 //                std::io::copy(&mut entry, &mut file)?;
@@ -432,7 +491,6 @@ pub mod docker_hub;
 
         async fn  download_release_proot_if_needed(&self)->anyhow::Result<()>{
             self.log("download_release_proot_if_needed executed");
-            self.set_current_directory_to_files()?;
 
             let proot_tmp_dir=self.replace_path_with_env("%TEMP%/".to_string()) ?;
             std::env::set_var("PROOT_TMP_DIR",  proot_tmp_dir.clone() );
@@ -447,6 +505,8 @@ pub mod docker_hub;
             if !containers_dir_path.exists() {
                 tokio::fs::create_dir_all(containers_dir_path).await?
             }
+
+            self.set_current_directory_to_files()?;
 
             if Path::new("bin/proot").exists() {return Ok(());}
             self.log("bin/proot not found");
@@ -466,7 +526,7 @@ pub mod docker_hub;
 //                let down_url=format!("https://github.com/proot-me/proot/releases/download/v{}/proot-v{}-{}-static",version,version,proot_archive_arch).to_string();
                 let down_url=format!("https://raw.githubusercontent.com/waowave/build-proot-android-fork/master/packages/proot-android-{}.tar.gz",proot_archive_arch).to_string();
                 self.log_string(format!("install_archive_with_url ur={}",down_url));
-                self.install_archive_with_url(down_url, "root").await?;
+                self.install_archive_with_url(down_url, "root",false,None).await?;
                 //self.download_url_to_file(down_url, "proot",true).await?;
             }
 
@@ -488,7 +548,7 @@ pub mod docker_hub;
             #[cfg(target_arch = "aarch64")]
             let proot_rs_archive_arch="aarch64-linux-android";
 
-            self.install_archive_with_url(format!("https://github.com/proot-me/proot-rs/releases/download/v0.1.0/proot-rs-v0.1.0-{}.tar.gz",proot_rs_archive_arch).to_string(), "").await?;
+            self.install_archive_with_url(format!("https://github.com/proot-me/proot-rs/releases/download/v0.1.0/proot-rs-v0.1.0-{}.tar.gz",proot_rs_archive_arch).to_string(), "",false,None).await?;
  
             Ok(())
         }
@@ -613,13 +673,15 @@ pub mod docker_hub;
                     .unwrap();
                     println!("res={}",res);
                 
-                /*
+                
                 let ccfg:ContainerConfigJSON = ContainerConfigJSON{
                     vm_path:"%FILES%/vms/test_vm".to_string(),
                     volumes:Some(HashMap::from([
                             ("%FILES%/data".to_string(),"/app/data".to_string())
                         ]                        
                     )),
+                    docker_hub:None,
+                    chroot_mode:"proot_cpp".to_string(),
                     start_on_boot:Some(true),
                     cmd:None,
                     entrypoint:None,
@@ -632,7 +694,8 @@ pub mod docker_hub;
                     "container":"ctest",
                     "data":serde_json::to_string(&ccfg).unwrap() ,
                 });
-                    
+
+                /*
                 res = client.post("http://localhost:3000/api.json")
                 .body(save_container_json.to_string() )
                 .send()
@@ -1397,7 +1460,7 @@ pub mod docker_hub;
                         let params:HPInstallArchiveOrDeb = serde_json::from_value(data.clone())?;
 
                         if cmd_s.as_str().eq("install_archive"){//tar(gz|xz)
-                            self.install_archive_with_url(params.url,params.ignore_prefix.as_str() ).await?;
+                            self.install_archive_with_url(params.url,params.ignore_prefix.as_str(),false,None ).await?;
                             command_result=true;
                         }else{//deb
                             self.install_deb_with_url(params.url,params.ignore_prefix.as_str()).await?;            
@@ -1489,11 +1552,32 @@ pub mod docker_hub;
  
             let (layers,container_conf_opt)=docker_hub.get_layers_urls(None).await?;
 
-            for (layer_url,layer_format)  in layers{
+            //exception doubles
+            let mut all_files_in_archives=0;
+            let mut unarchive_file_list_with_archive_url:HashMap<String,String>=HashMap::new(); //filename / archive_url
+            for (layer_url,layer_format)  in &layers{
                 self.log_string(format!("unarchiving blob {} with type {}",layer_url,layer_format));
-                let bin=docker_hub.download_blob(layer_url).await?;
-                self.unarchive_compressed_tar(bin.reader(), "tar.gz", "").await?;
+                let bin=docker_hub.download_blob(layer_url.clone()).await?;
+                let file_list = self.unarchive_compressed_tar(bin.reader(), "tar.gz", "",true,None).await?;
+                for file_name in file_list{
+                    all_files_in_archives=all_files_in_archives+1;
+                    unarchive_file_list_with_archive_url.insert(file_name, layer_url.clone() );
+                }
             }
+
+
+            let mut unarchived_files_count=0;
+            for (layer_url,layer_format)  in &layers{
+                self.log_string(format!("unarchiving blob {} with type {}",layer_url,layer_format));
+                let bin=docker_hub.download_blob(layer_url.clone()).await?;
+                let unarchive_only=    unarchive_file_list_with_archive_url.iter().filter_map(|(k,v)|{
+                    return   if v.eq(layer_url.as_str()) {Some(k.clone())}else{None}
+                } ).collect();
+                let unarchived_list = self.unarchive_compressed_tar(bin.reader(), "tar.gz", "",false,Some(&unarchive_only)).await?;
+                unarchived_files_count=unarchived_files_count+unarchived_list.len();
+            }
+
+            self.log_string(format!("LAYERS files: all count={} unarchived count={}",all_files_in_archives, unarchived_files_count ));
 
             if let Some(cont_conf)=container_conf_opt{
                 let json_str=serde_json::to_string(&cont_conf)?;
