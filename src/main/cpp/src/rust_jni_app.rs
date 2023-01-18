@@ -270,21 +270,23 @@ pub mod docker_hub;
                         if allow_unarchive_this_file {
     
                             let entrh=entry.header();
+
+                            let mut entry_mode=0o755;
+                            let mut entry_gid=0;
+                            let mut entry_uid=0;
+                            if let Ok(entry_mode_r)=entrh.mode(){
+                                entry_mode=entry_mode_r;
+                                println!("dir mode={}",entry_mode);
+                            }
+                            if let Ok(entry_uid_r)=entrh.uid(){
+                                entry_uid=entry_uid_r;
+                            }
+                            if let Ok(entry_gid_r)=entrh.gid(){
+                                entry_gid=entry_gid_r;
+                            }
+
                             if entrh.entry_type().is_dir(){
-                                let mut dir_mode=0o755;
-                                let mut dir_gid=0;
-                                let mut dir_uid=0;
-                                if let Ok(dir_mode_r)=entrh.mode(){
-                                    dir_mode=dir_mode_r;
-                                }
-                                if let Ok(dir_uid_r)=entrh.uid(){
-                                    dir_uid=dir_uid_r;
-                                }
-                                if let Ok(dir_gid_r)=entrh.gid(){
-                                    dir_gid=dir_gid_r;
-                                }
-                                
-                                ret.dirs_mode_uid_gid.insert(orig_path_string.clone(),  (dir_mode, dir_uid, dir_gid) );
+                                ret.dirs_mode_uid_gid.insert(orig_path_string.clone(),  (entry_mode, entry_uid, entry_gid) );
                             }else{
                                 ret.files.insert(orig_path_string.clone());
                             }
@@ -304,6 +306,18 @@ pub mod docker_hub;
                                             let tw_res=tokio::fs::write(&path, read_buf).await;
                                             if let Err(e)=tw_res{
                                                 ret.errors.push( format!("write(async) = {:?} filename={}",&e, &path.display() ) );
+                                            }else{
+                                                let perm = std::os::unix::prelude::PermissionsExt::from_mode(entry_mode);
+                                                if let Err(e) = tokio::fs::set_permissions(&path, perm).await{
+                                                    ret.errors.push( format!("set perm = {:?} filename={}",&e, &path.display() ) );
+                                                }
+
+                                                if let Err(e) = nix::unistd::chown(&path,
+                                                    Some(nix::unistd::Uid::from_raw(entry_uid.try_into().unwrap_or(0))),
+                                                    Some(nix::unistd::Gid::from_raw(entry_gid.try_into().unwrap_or(0)))
+                                                ){
+                                                    ret.errors.push( format!("chown = {:?} filename={}",&e, &path.display() ) );                                                    
+                                                }
                                             }
                                         }
                                     }
