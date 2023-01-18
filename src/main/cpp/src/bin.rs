@@ -4,6 +4,7 @@ use std::env;
 use rust_jni_app::RustAppInsideJNI;
 use serde::Deserialize;
 
+
 pub fn main() ->anyhow::Result<()> {
     let mut app = RustAppInsideJNI::new();    
     std::fs::write("/proc/bootevent", "virtual env LOADED! (main executed)").unwrap_or_default();

@@ -159,6 +159,7 @@ impl DockerHub{
         let cache_filename=self.cache_filename_for_url(url);
 
         if let Ok(cache_file_data)=tokio::fs::read(cache_filename.clone()).await{
+            println!("using cache = true");
             let cache_file_bytes=Bytes::from(cache_file_data);
             return Ok(cache_file_bytes);
         }
